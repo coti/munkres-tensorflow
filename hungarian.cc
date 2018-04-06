@@ -73,40 +73,39 @@ class HungarianOp : public OpKernel {
 
     auto assignments_output = assignments_tensor->tensor<bool, 5>();
 
-    const int batch_size = cost_shape[0];
+    const int batch_size = cost_shape[0]*cost_shape[1]*cost_shape[2]; // [gfkia]
     auto shard = [&costs, &cost_shape, &assignments_output, &adjacency](int64 start, int64 limit) {
-        for (int graph = start; graph < limit; ++graph) {
-            for (int node = 0; node < cost_shape[2]; ++node) {
-              vector<int> ids;
-                  for (int k = 0; k < cost_shape[2]; ++k) {
-                      if(adjacency(graph, node, k)) {
-                          ids.push_back(k);
-                      }
-                  }
-                for (int n = 0; n < cost_shape[1]; ++n) {
-                    Matrix<float> matrix(ids.size(), cost_shape[4]);
-                    for (int i = 0; i < ids.size(); ++i) {
-                      for (int j = 0; j < cost_shape[4]; ++j) {
-                        matrix(i,j) = costs(graph, n, ids[i], j);
-                      }
-                    }
-                    Munkres<float> munk = Munkres<float>();
-                    munk.solve(matrix);
+        for (int job = start; job < limit; ++job) {
+            int graph = job / cost_shape[1] / cost_shape[2];
+            int n = job / cost_shape[2] % cost_shape[1];
+            int node = job % cost_shape[2];
+            vector<int> ids;
+            for (int k = 0; k < cost_shape[2]; ++k) {
+                if(adjacency(graph, node, k)) {
+                    ids.push_back(k);
+                }
+            }
+            Matrix<float> matrix(ids.size(), cost_shape[4]);
+            for (int i = 0; i < ids.size(); ++i) {
+                for (int j = 0; j < cost_shape[4]; ++j) {
+                    matrix(i,j) = costs(graph, n, ids[i], j);
+                }
+            }
+            Munkres<float> munk = Munkres<float>();
+            munk.solve(matrix);
 
-                    for (int i = 0; i < ids.size(); ++i) {
-                      for (int j = 0; j < cost_shape[4]; ++j){
-                        if(matrix(i,j) == 0){
-                          assignments_output(graph, n, node, ids[i], j) = true;
-                        }
-                      }
+            for (int i = 0; i < ids.size(); ++i) {
+                for (int j = 0; j < cost_shape[4]; ++j){
+                    if(matrix(i,j) == 0){
+                        assignments_output(graph, n, node, ids[i], j) = true;
                     }
                 }
             }
-      }
+        }
     };
 
     // This is just a very crude approximation
-    const int64 single_cost = 10000 * cost_shape[1] * cost_shape[1] * cost_shape[2] * cost_shape[3] * cost_shape[3];
+    const int64 single_cost = 10000 * cost_shape[1] * cost_shape[1] * cost_shape[2];
 
     auto worker_threads = context->device()->tensorflow_cpu_worker_threads();
     Shard(worker_threads->num_threads, worker_threads->workers, batch_size, single_cost, shard);
