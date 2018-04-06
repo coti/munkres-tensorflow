@@ -16,7 +16,6 @@
  *   along with this program; if not, write to the Free Software
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
-
 #if !defined(_MUNKRES_H_)
 #define _MUNKRES_H_
 
@@ -46,7 +45,7 @@ public:
      *
      */
     void solve(Matrix<Data> &m) {
-        const size_t rows = m.rows(),
+        size_t rows = m.rows(),
                 columns = m.columns(),
                 size = std::max(rows, columns);
 
@@ -61,7 +60,7 @@ public:
             // If the input matrix isn't square, make it square
             // and fill the empty values with the largest value present
             // in the matrix.
-            matrix.resize(size, size, matrix.max());
+            matrix.resize(size, size, matrix.max()+1);
         }
 
 
