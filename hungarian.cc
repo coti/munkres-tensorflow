@@ -3,6 +3,7 @@
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/shape_inference.h"
 #include "tensorflow/core/util/work_sharder.h"
+#include "tensorflow/core/util/tensor_format.h"
 #include <iostream>
 #include "munkres.h"
 
@@ -22,6 +23,10 @@ REGISTER_OP("Hungarian")
       //Same shape as input, droping last dimension, as an index is returned for each assignment
         ShapeHandle input = c->input(0);
         ShapeHandle adj = c->input(1);
+        
+        string data_format;
+        c->GetAttr("data_format", &data_format);
+        int nodes_axis = (data_format == "NHWC") ? 1 : 2;
 
         if (!c->RankKnown(input)) {
           // If we do not have the rank of the input, we don't know the output shape.
@@ -33,8 +38,8 @@ REGISTER_OP("Hungarian")
         std::vector< DimensionHandle> dims;
         for (int i = 0; i < input_rank; ++i) {
             dims.emplace_back(c->Dim(input, i));
-            if (i == 2) {
-                    dims.emplace_back(c->Dim(input, i));
+            if (i == nodes_axis) {
+                    dims.emplace_back(c->Dim(input, 2));
             }
         }
         c->set_output(0, c->MakeShape(dims));
@@ -45,7 +50,15 @@ REGISTER_OP("Hungarian")
 //TODO: add error handling for inf or input with overflow
 class HungarianOp : public OpKernel {
  public:
-  explicit HungarianOp(OpKernelConstruction* context) : OpKernel(context) {}
+      explicit HungarianOp(OpKernelConstruction* context) : OpKernel(context) {
+          string data_format;
+          if (context->GetAttr("data_format", &data_format).ok()) {
+              OP_REQUIRES(context, FormatFromString(data_format, &data_format_),
+                          errors::InvalidArgument("Invalid data format"));
+          } else {
+              data_format_ = FORMAT_NHWC;
+          }
+  }
 
   void Compute(OpKernelContext* context) override {
     // Grab the input tensor
@@ -56,13 +69,13 @@ class HungarianOp : public OpKernel {
     // Create an output tensor
     Tensor* assignments_tensor = NULL;
       
-    const TensorShape& input_shape = costs_tensor.shape();
-    TensorShape output_shape = input_shape;
-    output_shape.InsertDim(2, input_shape.dim_size(2));
+    const TensorShape& cost_shape = costs_tensor.shape();
+    TensorShape output_shape = cost_shape;
+    output_shape.InsertDim((data_format_ == FORMAT_NHWC) ? 1 : 2, cost_shape.dim_size(2));
     OP_REQUIRES_OK(context, context->allocate_output(0, output_shape,
                                                      &assignments_tensor));
     
-    auto cost_shape = output_shape.dim_sizes();
+    auto input_shape = cost_shape.dim_sizes();
     auto output_flat = assignments_tensor->flat<bool>();
 
     // Set all but the first element of the output tensor to 0.
@@ -73,21 +86,22 @@ class HungarianOp : public OpKernel {
 
     auto assignments_output = assignments_tensor->tensor<bool, 5>();
 
-    const int batch_size = cost_shape[0]*cost_shape[1]*cost_shape[2]; // [gfkia]
-    auto shard = [&costs, &cost_shape, &assignments_output, &adjacency](int64 start, int64 limit) {
+    const int batch_size = input_shape[0]*input_shape[1]*input_shape[2]; // [gfkia]
+    TensorFormat data_format = data_format_;
+    auto shard = [&data_format, &costs, &input_shape, &assignments_output, &adjacency](int64 start, int64 limit) {
         for (int job = start; job < limit; ++job) {
-            int graph = job / cost_shape[1] / cost_shape[2];
-            int n = job / cost_shape[2] % cost_shape[1];
-            int node = job % cost_shape[2];
+            int graph = job / input_shape[1] / input_shape[2];
+            int n = job / input_shape[2] % input_shape[1];
+            int node = job % input_shape[2];
             vector<int> ids;
-            for (int k = 0; k < cost_shape[2]; ++k) {
+            for (int k = 0; k < input_shape[2]; ++k) {
                 if(adjacency(graph, node, k)) {
                     ids.push_back(k);
                 }
             }
-            Matrix<float> matrix(ids.size(), cost_shape[4]);
+            Matrix<float> matrix(ids.size(), input_shape[3]);
             for (int i = 0; i < ids.size(); ++i) {
-                for (int j = 0; j < cost_shape[4]; ++j) {
+                for (int j = 0; j < input_shape[3]; ++j) {
                     matrix(i,j) = costs(graph, n, ids[i], j);
                 }
             }
@@ -95,9 +109,14 @@ class HungarianOp : public OpKernel {
             munk.solve(matrix);
 
             for (int i = 0; i < ids.size(); ++i) {
-                for (int j = 0; j < cost_shape[4]; ++j){
+                for (int j = 0; j < input_shape[3]; ++j){
                     if(matrix(i,j) == 0){
-                        assignments_output(graph, n, node, ids[i], j) = true;
+                        if (data_format == FORMAT_NHWC) {
+                            assignments_output(graph, node, n, ids[i], j) = true;
+                        } else {
+                            assignments_output(graph, n, node, ids[i], j) = true;
+                        }
+                        
                     }
                 }
             }
@@ -105,11 +124,14 @@ class HungarianOp : public OpKernel {
     };
 
     // This is just a very crude approximation
-    const int64 single_cost = 10000 * cost_shape[1] * cost_shape[1] * cost_shape[2];
+    const int64 single_cost = 10000 * input_shape[2] * input_shape[3];
 
     auto worker_threads = context->device()->tensorflow_cpu_worker_threads();
     Shard(worker_threads->num_threads, worker_threads->workers, batch_size, single_cost, shard);
   }
+
+ private:
+    TensorFormat data_format_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("Hungarian").Device(DEVICE_CPU), HungarianOp);
