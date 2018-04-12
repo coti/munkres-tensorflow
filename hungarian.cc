@@ -88,40 +88,69 @@ class HungarianOp : public OpKernel {
 
     const int batch_size = input_shape[0]*input_shape[1]*input_shape[2]; // [gfkia]
     TensorFormat data_format = data_format_;
-    auto shard = [&data_format, &costs, &input_shape, &assignments_output, &adjacency](int64 start, int64 limit) {
-        for (int job = start; job < limit; ++job) {
-            int graph = job / input_shape[1] / input_shape[2];
-            int n = job / input_shape[2] % input_shape[1];
-            int node = job % input_shape[2];
-            vector<int> ids;
-            for (int k = 0; k < input_shape[2]; ++k) {
-                if(adjacency(graph, node, k)) {
-                    ids.push_back(k);
+    std::function<void(int64, int64)> shard; 
+    if (data_format == FORMAT_NHWC) {
+        shard = [&costs, &input_shape, &assignments_output, &adjacency](int64 start, int64 limit) {
+            for (int job = start; job < limit; ++job) {
+                int graph = job / input_shape[1] / input_shape[2];
+                int n = job / input_shape[2] % input_shape[1];
+                int node = job % input_shape[2];
+                vector<int> ids;
+                for (int k = 0; k < input_shape[2]; ++k) {
+                    if(adjacency(graph, node, k)) {
+                        ids.push_back(k);
+                    }
                 }
-            }
-            Matrix<float> matrix(ids.size(), input_shape[3]);
-            for (int i = 0; i < ids.size(); ++i) {
-                for (int j = 0; j < input_shape[3]; ++j) {
-                    matrix(i,j) = costs(graph, n, ids[i], j);
+                Matrix<float> matrix(ids.size(), input_shape[3]);
+                for (int i = 0; i < ids.size(); ++i) {
+                    for (int j = 0; j < input_shape[3]; ++j) {
+                        matrix(i,j) = costs(graph, n, ids[i], j);
+                    }
                 }
-            }
-            Munkres<float> munk = Munkres<float>();
-            munk.solve(matrix);
+                Munkres<float> munk = Munkres<float>();
+                munk.solve(matrix);
 
-            for (int i = 0; i < ids.size(); ++i) {
-                for (int j = 0; j < input_shape[3]; ++j){
-                    if(matrix(i,j) == 0){
-                        if (data_format == FORMAT_NHWC) {
-                            assignments_output(graph, node, n, ids[i], j) = true;
-                        } else {
-                            assignments_output(graph, n, node, ids[i], j) = true;
+                for (int i = 0; i < ids.size(); ++i) {
+                    for (int j = 0; j < input_shape[3]; ++j){
+                        if(matrix(i,j) == 0){
+                                assignments_output(graph, node, n, ids[i], j) = true;
                         }
-                        
                     }
                 }
             }
-        }
-    };
+        };
+    }
+    else {
+        shard = [&costs, &input_shape, &assignments_output, &adjacency](int64 start, int64 limit) {
+            for (int job = start; job < limit; ++job) {
+                int graph = job / input_shape[1] / input_shape[2];
+                int n = job / input_shape[2] % input_shape[1];
+                int node = job % input_shape[2];
+                vector<int> ids;
+                for (int k = 0; k < input_shape[2]; ++k) {
+                    if(adjacency(graph, node, k)) {
+                        ids.push_back(k);
+                    }
+                }
+                Matrix<float> matrix(ids.size(), input_shape[3]);
+                for (int i = 0; i < ids.size(); ++i) {
+                    for (int j = 0; j < input_shape[3]; ++j) {
+                        matrix(i,j) = costs(graph, n, ids[i], j);
+                    }
+                }
+                Munkres<float> munk = Munkres<float>();
+                munk.solve(matrix);
+
+                for (int i = 0; i < ids.size(); ++i) {
+                    for (int j = 0; j < input_shape[3]; ++j){
+                        if(matrix(i,j) == 0){
+                            assignments_output(graph, n, node, ids[i], j) = true;
+                        }
+                    }
+                }
+            }
+        };
+    }
 
     // This is just a very crude approximation
     const int64 single_cost = 10000 * input_shape[2] * input_shape[3];
