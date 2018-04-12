@@ -101,19 +101,21 @@ class HungarianOp : public OpKernel {
                         ids.push_back(k);
                     }
                 }
-                Matrix<float> matrix(ids.size(), input_shape[3]);
-                for (int i = 0; i < ids.size(); ++i) {
-                    for (int j = 0; j < input_shape[3]; ++j) {
-                        matrix(i,j) = costs(graph, n, ids[i], j);
+                if (ids.size() > 0) {
+                    Matrix<float> matrix(ids.size(), input_shape[3]);
+                    for (int i = 0; i < ids.size(); ++i) {
+                        for (int j = 0; j < input_shape[3]; ++j) {
+                            matrix(i,j) = costs(graph, n, ids[i], j);
+                        }
                     }
-                }
-                Munkres<float> munk = Munkres<float>();
-                munk.solve(matrix);
+                    Munkres<float> munk = Munkres<float>();
+                    munk.solve(matrix);
 
-                for (int i = 0; i < ids.size(); ++i) {
-                    for (int j = 0; j < input_shape[3]; ++j){
-                        if(matrix(i,j) == 0){
-                                assignments_output(graph, node, n, ids[i], j) = true;
+                    for (int i = 0; i < ids.size(); ++i) {
+                        for (int j = 0; j < input_shape[3]; ++j){
+                            if(matrix(i,j) == 0){
+                                    assignments_output(graph, node, n, ids[i], j) = true;
+                            }
                         }
                     }
                 }
